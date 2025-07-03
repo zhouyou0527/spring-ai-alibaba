@@ -30,17 +30,17 @@ public class GetTextAction extends BrowserAction {
 
 	@Override
 	public ToolExecuteResult execute(BrowserRequestVO request) throws Exception {
-		Page page = getCurrentPage(); // 获取 Playwright 的 Page 实例
+		Page page = getCurrentPage(); // Get Playwright Page instance
 		StringBuilder allText = new StringBuilder();
 		for (com.microsoft.playwright.Frame frame : page.frames()) {
 			try {
 				String text = frame.innerText("body");
 				if (text != null && !text.isEmpty()) {
-					allText.append(text).append("\n");
+					allText.append(text).append("\\n");
 				}
 			}
 			catch (Exception e) {
-				// 忽略没有body的frame
+				// Ignore frames without body
 			}
 		}
 		String result = allText.toString().trim();

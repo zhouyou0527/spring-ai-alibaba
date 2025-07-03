@@ -27,7 +27,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 @Component
@@ -93,6 +97,28 @@ public class StartNodeDataConverter extends AbstractNodeDataConverter<StartNodeD
 			this.dialectConverter = dialectConverter;
 		}
 
+	}
+
+	@Override
+	public String generateVarName(int count) {
+		return "startNode" + count;
+	}
+
+	@Override
+	public Stream<Variable> extractWorkflowVars(StartNodeData data) {
+		return Optional.ofNullable(data.getStartInputs())
+			.stream()
+			.flatMap(List::stream)
+			.map(sel -> new Variable(sel.getVariable(), com.alibaba.cloud.ai.model.VariableType.STRING.value()));
+	}
+
+	@Override
+	public void postProcess(StartNodeData data, String varName) {
+		List<Variable> vars = data.getStartInputs()
+			.stream()
+			.map(si -> new Variable(si.getVariable(), VariableType.STRING.value()))
+			.toList();
+		data.setOutputs(vars);
 	}
 
 }

@@ -16,8 +16,6 @@
 package com.alibaba.cloud.ai.example.manus.tool;
 
 import com.alibaba.cloud.ai.example.manus.tool.code.ToolExecuteResult;
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.TypeReference;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -25,19 +23,51 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 
 import org.springframework.ai.chat.model.ToolContext;
-import org.springframework.ai.document.Document;
 import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.ai.tool.function.FunctionToolCallback;
 
-public class DocLoaderTool implements ToolCallBiFunctionDef {
+public class DocLoaderTool implements ToolCallBiFunctionDef<DocLoaderTool.DocLoaderInput> {
 
 	private static final Logger log = LoggerFactory.getLogger(DocLoaderTool.class);
+
+	/**
+	 * Internal input class for defining input parameters of the document loading tool
+	 */
+	public static class DocLoaderInput {
+
+		@com.fasterxml.jackson.annotation.JsonProperty("file_type")
+		private String fileType;
+
+		@com.fasterxml.jackson.annotation.JsonProperty("file_path")
+		private String filePath;
+
+		public DocLoaderInput() {
+		}
+
+		public DocLoaderInput(String fileType, String filePath) {
+			this.fileType = fileType;
+			this.filePath = filePath;
+		}
+
+		public String getFileType() {
+			return fileType;
+		}
+
+		public void setFileType(String fileType) {
+			this.fileType = fileType;
+		}
+
+		public String getFilePath() {
+			return filePath;
+		}
+
+		public void setFilePath(String filePath) {
+			this.filePath = filePath;
+		}
+
+	}
 
 	private static String PARAMETERS = """
 			{
@@ -70,11 +100,13 @@ public class DocLoaderTool implements ToolCallBiFunctionDef {
 		return functionTool;
 	}
 
-	public static FunctionToolCallback getFunctionToolCallback() {
-		return FunctionToolCallback.builder(name, new DocLoaderTool()) // 修改为正确的工具类
+	/**
+	 * Get FunctionToolCallback for Spring AI
+	 */
+	public static FunctionToolCallback<DocLoaderInput, ToolExecuteResult> getFunctionToolCallback() {
+		return FunctionToolCallback.builder(name, new DocLoaderTool()::apply)
 			.description(description)
-			.inputSchema(PARAMETERS)
-			.inputType(String.class)
+			.inputType(DocLoaderInput.class)
 			.build();
 	}
 
@@ -87,16 +119,14 @@ public class DocLoaderTool implements ToolCallBiFunctionDef {
 
 	private String lastFileType = "";
 
-	public ToolExecuteResult run(String toolInput) {
-		log.info("DocLoaderTool toolInput:{}", toolInput);
-		try {
-			Map<String, Object> toolInputMap = JSON.parseObject(toolInput, new TypeReference<Map<String, Object>>() {
-			});
-			String fileType = (String) toolInputMap.get("file_type");
-			String filePath = (String) toolInputMap.get("file_path");
-			this.lastFilePath = filePath;
-			this.lastFileType = fileType;
+	public ToolExecuteResult run(DocLoaderInput input) {
+		String fileType = input.getFileType();
+		String filePath = input.getFilePath();
+		log.info("DocLoaderTool fileType: {}, filePath: {}", fileType, filePath);
+		this.lastFilePath = filePath;
+		this.lastFileType = fileType;
 
+		try {
 			if (!"pdf".equalsIgnoreCase(fileType)) {
 				return new ToolExecuteResult("Unsupported file type: " + fileType);
 			}
@@ -137,8 +167,8 @@ public class DocLoaderTool implements ToolCallBiFunctionDef {
 	}
 
 	@Override
-	public Class<?> getInputType() {
-		return String.class;
+	public Class<DocLoaderInput> getInputType() {
+		return DocLoaderInput.class;
 	}
 
 	@Override
@@ -147,15 +177,13 @@ public class DocLoaderTool implements ToolCallBiFunctionDef {
 	}
 
 	@Override
-	public ToolExecuteResult apply(String t, ToolContext u) {
-		return run(t);
+	public ToolExecuteResult apply(DocLoaderInput input, ToolContext context) {
+		return run(input);
 	}
-
-	private String planId;
 
 	@Override
 	public void setPlanId(String planId) {
-		this.planId = planId;
+		// Implementation for setting planId if required in the future.
 	}
 
 	@Override

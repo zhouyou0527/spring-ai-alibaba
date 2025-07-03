@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2025 the original author or authors.
  *
@@ -18,15 +17,24 @@ package com.alibaba.cloud.ai.example.manus.tool.browser.actions;
 
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.alibaba.cloud.ai.example.manus.tool.browser.BrowserUseTool;
 import com.alibaba.cloud.ai.example.manus.tool.browser.DriverWrapper;
 import com.alibaba.cloud.ai.example.manus.tool.browser.InteractiveElement;
 import com.alibaba.cloud.ai.example.manus.tool.code.ToolExecuteResult;
+import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.ElementHandle;
 import com.microsoft.playwright.Page;
+import com.microsoft.playwright.TimeoutError;
 
 public abstract class BrowserAction {
+
+	private final static Logger log = LoggerFactory.getLogger(BrowserAction.class);
 
 	public abstract ToolExecuteResult execute(BrowserRequestVO request) throws Exception;
 
@@ -41,12 +49,31 @@ public abstract class BrowserAction {
 	}
 
 	/**
-	 * 模拟人类行为
-	 * @param element Playwright的ElementHandle实例
+	 * Get browser operation timeout configuration
+	 * @return Timeout in milliseconds, returns default value of 30 seconds if not
+	 * configured
+	 */
+	protected Integer getBrowserTimeoutMs() {
+		Integer timeout = getBrowserUseTool().getManusProperties().getBrowserRequestTimeout();
+		return (timeout != null ? timeout : 30) * 1000; // Convert to milliseconds
+	}
+
+	/**
+	 * Get browser operation timeout configuration
+	 * @return Timeout in seconds, returns default value of 30 seconds if not configured
+	 */
+	protected Integer getBrowserTimeoutSec() {
+		Integer timeout = getBrowserUseTool().getManusProperties().getBrowserRequestTimeout();
+		return timeout != null ? timeout : 30; // Default timeout is 30 seconds
+	}
+
+	/**
+	 * Simulate human behavior
+	 * @param element Playwright ElementHandle instance
 	 */
 	protected void simulateHumanBehavior(ElementHandle element) {
 		try {
-			// 添加随机延迟
+			// Add random delay
 			Thread.sleep(new Random().nextInt(500) + 200);
 		}
 		catch (InterruptedException e) {
@@ -55,7 +82,7 @@ public abstract class BrowserAction {
 	}
 
 	/**
-	 * 获取 DriverWrapper 实例
+	 * Get DriverWrapper instance
 	 * @return DriverWrapper
 	 */
 	protected DriverWrapper getDriverWrapper() {
@@ -64,8 +91,8 @@ public abstract class BrowserAction {
 	}
 
 	/**
-	 * 获取当前页面 Page 实例
-	 * @return 当前 Playwright 的 Page 实例
+	 * Get current page Page instance
+	 * @return Current Playwright Page instance
 	 */
 	protected Page getCurrentPage() {
 		DriverWrapper driverWrapper = getDriverWrapper();
@@ -73,13 +100,93 @@ public abstract class BrowserAction {
 	}
 
 	/**
-	 * 获取可交互元素
-	 * @param page Playwright的Page实例
-	 * @return 可交互元素列表
+	 * Get interactive elements
+	 * @param page Playwright Page instance
+	 * @return List of interactive elements
 	 */
 	protected List<InteractiveElement> getInteractiveElements(Page page) {
 		DriverWrapper driverWrapper = browserUseTool.getDriver();
 		return driverWrapper.getInteractiveElementRegistry().getAllElements(page);
+	}
+
+	protected String clickAndSwitchToNewTabIfOpened(Page pageToClickOn, Runnable clickLambda) {
+		Page newPageFromPopup = null;
+		String originalPageUrl = pageToClickOn.url();
+		BrowserContext context = pageToClickOn.context();
+		List<Page> pagesBeforeClick = context.pages();
+		Set<String> urlsBeforeClick = pagesBeforeClick.stream().map(Page::url).collect(Collectors.toSet());
+
+		try {
+			Integer timeout = getBrowserTimeoutMs();
+			Page.WaitForPopupOptions popupOptions = new Page.WaitForPopupOptions().setTimeout(Math.min(timeout, 3000));
+
+			newPageFromPopup = pageToClickOn.waitForPopup(popupOptions, clickLambda);
+
+			if (newPageFromPopup != null) {
+				log.info("waitForPopup detected new page: {}", newPageFromPopup.url());
+				if (getDriverWrapper().getCurrentPage() != newPageFromPopup) {
+					getDriverWrapper().setCurrentPage(newPageFromPopup);
+				}
+				return "and opened in new tab: " + newPageFromPopup.url();
+			}
+
+			// Fallback if newPageFromPopup is null but no exception (unlikely for
+			// waitForPopup)
+			if (!pageToClickOn.isClosed() && !pageToClickOn.url().equals(originalPageUrl)) {
+				log.info("Page navigated in the same tab (fallback check): {}", pageToClickOn.url());
+				return "and navigated in the same tab to: " + pageToClickOn.url();
+			}
+			return "successfully.";
+
+		}
+		catch (TimeoutError e) {
+			log.warn(
+					"No popup detected by waitForPopup within timeout. Click action was performed. Checking page states...");
+
+			List<Page> pagesAfterTimeout = context.pages();
+			List<Page> newPagesByDiff = pagesAfterTimeout.stream()
+				.filter(p -> !urlsBeforeClick.contains(p.url()))
+				.collect(Collectors.toList());
+
+			if (!newPagesByDiff.isEmpty()) {
+				Page newlyFoundPage = newPagesByDiff.get(0);
+				log.info("New tab found by diffing URLs after waitForPopup timeout: {}", newlyFoundPage.url());
+				getDriverWrapper().setCurrentPage(newlyFoundPage);
+				return "and opened in new tab: " + newlyFoundPage.url();
+			}
+
+			if (!pageToClickOn.isClosed() && !pageToClickOn.url().equals(originalPageUrl)) {
+				if (getDriverWrapper().getCurrentPage() != pageToClickOn) {
+					getDriverWrapper().setCurrentPage(pageToClickOn);
+				}
+				log.info("Page navigated in the same tab after timeout: {}", pageToClickOn.url());
+				return "and navigated in the same tab to: " + pageToClickOn.url();
+			}
+
+			Page currentPageInWrapper = getDriverWrapper().getCurrentPage();
+			if (pageToClickOn.isClosed() && currentPageInWrapper != null && !currentPageInWrapper.isClosed()
+					&& !urlsBeforeClick.contains(currentPageInWrapper.url())) {
+				log.info("Original page closed, current page is now: {}", currentPageInWrapper.url());
+				return "and current page changed to: " + currentPageInWrapper.url();
+			}
+			log.info("No new tab or significant navigation detected after timeout.");
+			return "successfully, but no new tab was detected by waitForPopup or URL diff.";
+		}
+		catch (Exception e) {
+			log.error("Exception during click or popup handling: {}", e.getMessage(), e);
+
+			List<Page> pagesAfterError = context.pages();
+			List<Page> newPagesByDiffAfterError = pagesAfterError.stream()
+				.filter(p -> !urlsBeforeClick.contains(p.url()))
+				.collect(Collectors.toList());
+			if (!newPagesByDiffAfterError.isEmpty()) {
+				Page newlyFoundPage = newPagesByDiffAfterError.get(0);
+				log.info("New tab found by diffing URLs after an error: {}", newlyFoundPage.url());
+				getDriverWrapper().setCurrentPage(newlyFoundPage);
+				return "with error '" + e.getMessage() + "' but opened new tab: " + newlyFoundPage.url();
+			}
+			return "with error: " + e.getMessage();
+		}
 	}
 
 }

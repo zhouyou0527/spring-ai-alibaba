@@ -19,7 +19,13 @@ import com.alibaba.cloud.ai.model.App;
 import com.alibaba.cloud.ai.model.AppMetadata;
 import com.alibaba.cloud.ai.model.Variable;
 import com.alibaba.cloud.ai.model.chatbot.ChatBot;
-import com.alibaba.cloud.ai.model.workflow.*;
+import com.alibaba.cloud.ai.model.workflow.Edge;
+import com.alibaba.cloud.ai.model.workflow.Graph;
+import com.alibaba.cloud.ai.model.workflow.Node;
+import com.alibaba.cloud.ai.model.workflow.NodeData;
+import com.alibaba.cloud.ai.model.workflow.NodeType;
+import com.alibaba.cloud.ai.model.workflow.Workflow;
+import com.alibaba.cloud.ai.model.workflow.nodedata.VariableAggregatorNodeData;
 import com.alibaba.cloud.ai.service.dsl.DSLDialectType;
 import com.alibaba.cloud.ai.service.dsl.Serializer;
 import com.alibaba.cloud.ai.service.dsl.NodeDataConverter;
@@ -32,8 +38,14 @@ import org.apache.commons.lang3.NotImplementedException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * DifyDSLAdapter converts Dify DSL to {@link App} and vice versa.
@@ -110,14 +122,13 @@ public class DifyDSLAdapter extends AbstractDSLAdapter {
 		objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 		// map key is snake_case style
 		objectMapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+		List<Variable> convVars = new ArrayList<>();
 		if (workflowData.containsKey("conversation_variables")) {
 			List<Map<String, Object>> variables = (List<Map<String, Object>>) workflowData
 				.get("conversation_variables");
-			List<Variable> workflowVars = variables.stream()
-				.map(variable -> objectMapper.convertValue(variable, Variable.class))
-				.collect(Collectors.toList());
-			workflow.setWorkflowVars(workflowVars);
+			convVars = variables.stream().map(variable -> objectMapper.convertValue(variable, Variable.class)).toList();
 		}
+
 		if (workflowData.containsKey("environment_variables")) {
 			List<Map<String, Object>> variables = (List<Map<String, Object>>) workflowData.get("environment_variables");
 			List<Variable> envVars = variables.stream()
@@ -125,7 +136,24 @@ public class DifyDSLAdapter extends AbstractDSLAdapter {
 				.collect(Collectors.toList());
 			workflow.setEnvVars(envVars);
 		}
-		workflow.setGraph(constructGraph((Map<String, Object>) workflowData.get("graph")));
+
+		Graph graph = constructGraph((Map<String, Object>) workflowData.get("graph"));
+		workflow.setGraph(graph);
+		// register overAllState output key
+		List<Variable> extraVars = graph.getNodes().stream().flatMap(node -> {
+			NodeType type = NodeType.fromValue(node.getType())
+				.orElseThrow(() -> new IllegalArgumentException("Unsupported NodeType: " + node.getType()));
+			@SuppressWarnings("unchecked")
+			NodeDataConverter<NodeData> conv = (NodeDataConverter<NodeData>) getNodeDataConverter(type);
+			return conv.extractWorkflowVars(node.getData());
+		}).toList();
+
+		List<Variable> allVars = new ArrayList<>(Stream.concat(convVars.stream(), extraVars.stream())
+			.collect(Collectors.toMap(Variable::getName, v -> v, (v1, v2) -> v1))
+			.values());
+
+		workflow.setWorkflowVars(allVars);
+
 		return workflow;
 	}
 
@@ -149,26 +177,87 @@ public class DifyDSLAdapter extends AbstractDSLAdapter {
 	}
 
 	private List<Node> constructNodes(List<Map<String, Object>> nodeMaps) {
-		ObjectMapper objectMapper = new ObjectMapper();
-		objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+		ObjectMapper objectMapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+				false);
+
+		Map<NodeType, Integer> counters = new HashMap<>();
 		List<Node> nodes = new ArrayList<>();
+
 		for (Map<String, Object> nodeMap : nodeMaps) {
+			@SuppressWarnings("unchecked")
 			Map<String, Object> nodeDataMap = (Map<String, Object>) nodeMap.get("data");
 			String difyNodeType = (String) nodeDataMap.get("type");
+			if (difyNodeType == null || difyNodeType.isBlank()) {
+				// This node is just a "note", skip it, and the corresponding node will
+				// not be generated [compatible dify]
+				continue;
+			}
+			String nodeId = (String) nodeMap.get("id");
+			nodeDataMap.put("id", nodeId);
 			// determine the type of dify node is supported yet
 			NodeType nodeType = NodeType.fromDifyValue(difyNodeType)
 				.orElseThrow(() -> new NotImplementedException("unsupported node type " + difyNodeType));
+
 			// convert node map to workflow node using jackson
 			nodeMap.remove("data");
-			Node n = objectMapper.convertValue(nodeMap, Node.class);
+			Node node = objectMapper.convertValue(nodeMap, Node.class);
 			// set title and desc
-			n.setTitle((String) nodeDataMap.get("title")).setDesc((String) nodeDataMap.get("desc"));
+			node.setTitle((String) nodeDataMap.get("title")).setDesc((String) nodeDataMap.get("desc"));
+
 			// convert node data using specific WorkflowNodeDataConverter
-			NodeDataConverter<?> nodeDataConverter = getNodeDataConverter(nodeType);
-			n.setData(nodeDataConverter.parseMapData(nodeDataMap, DSLDialectType.DIFY));
-			n.setType(nodeType.value());
-			nodes.add(n);
+			@SuppressWarnings("unchecked")
+			NodeDataConverter<NodeData> converter = (NodeDataConverter<NodeData>) getNodeDataConverter(nodeType);
+
+			NodeData data = converter.parseMapData(nodeDataMap, DSLDialectType.DIFY);
+
+			// Generate a readable varName and inject it into NodeData
+			int count = counters.merge(nodeType, 1, Integer::sum);
+			String varName = converter.generateVarName(count);
+			data.setVarName(varName);
+
+			// Post-processing: Overwrite the default outputKey and refresh the outputs
+			converter.postProcess(data, varName);
+
+			node.setData(data);
+			node.setType(nodeType.value());
+			nodes.add(node);
 		}
+
+		Map<String, String> idToOutputKey = nodes.stream().collect(Collectors.toMap(Node::getId, n -> {
+			try {
+				return ((VariableAggregatorNodeData) n.getData()).getOutputKey();
+			}
+			catch (ClassCastException e) {
+				return n.getData().getOutputs().get(0).getName();
+			}
+		}));
+
+		// Replace all variable paths in all aggregation nodes.
+		for (Node node : nodes) {
+			if (node.getData() instanceof VariableAggregatorNodeData agg) {
+				List<List<String>> newVars = agg.getVariables().stream().map(path -> {
+					String srcId = path.get(0);
+					String tail = path.get(1);
+					String mapped = idToOutputKey.getOrDefault(srcId, srcId);
+					return List.of(mapped, tail);
+				}).toList();
+				agg.setVariables(newVars);
+
+				var adv = agg.getAdvancedSettings();
+				if (adv != null && adv.getGroups() != null) {
+					for (var group : adv.getGroups()) {
+						List<List<String>> newGroupVars = group.getVariables().stream().map(path -> {
+							String srcId = path.get(0);
+							String tail = path.get(1);
+							String mapped = idToOutputKey.getOrDefault(srcId, srcId);
+							return List.of(mapped, tail);
+						}).toList();
+						group.setVariables(newGroupVars);
+					}
+				}
+			}
+		}
+
 		return nodes;
 	}
 

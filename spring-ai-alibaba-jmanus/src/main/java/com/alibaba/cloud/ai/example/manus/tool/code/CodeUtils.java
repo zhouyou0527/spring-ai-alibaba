@@ -45,8 +45,6 @@ public class CodeUtils {
 
 	private static final int DEFAULT_TIMEOUT = 600;
 
-	public static final String WORKING_DIR = Paths.get(System.getProperty("user.dir"), "extensions").toString();
-
 	public static List<Pair<String, String>> extractCode(String text, boolean detectSingleLineCode) {
 		List<Pair<String, String>> extracted = new ArrayList<>();
 		String content = contentStr(text);
@@ -115,7 +113,7 @@ public class CodeUtils {
 			filename = String.format("tmp_code_%s.%s", code_hash, lang.startsWith("python") ? "py" : lang);
 		}
 		if (workDir == null) {
-			workDir = WORKING_DIR;
+			workDir = System.getProperty("user.dir");
 		}
 		String filepath = Paths.get(workDir, filename).toString();
 		String file_dir = Paths.get(filepath).getParent().toString();
@@ -213,6 +211,39 @@ public class CodeUtils {
 			resultList.add(response);
 		}
 		return resultList.stream().collect(Collectors.joining("\n"));
+	}
+
+	/**
+	 * Get shared file directory (create a shared folder in the input directory and return
+	 * its path).
+	 * @param baseDir Base directory (if empty, use system property user.dir)
+	 * @param sharedFolderName Shared folder name (such as "shared")
+	 * @return Absolute path of the shared folder
+	 */
+	public static String getSharedDirectory(String baseDir, String sharedFolderName) {
+		if (baseDir == null || baseDir.isEmpty()) {
+			baseDir = System.getProperty("user.dir");
+		}
+		String sharedDir = Paths.get(baseDir, sharedFolderName).toString();
+		try {
+			Files.createDirectories(Paths.get(sharedDir));
+		}
+		catch (IOException e) {
+			log.error("Failed to create shared directory: {}", sharedDir, e);
+		}
+		return sharedDir;
+	}
+
+	/**
+	 * Get working directory (absolute path of the extensions directory).
+	 * @param baseDir Base directory (if empty, use system property user.dir)
+	 * @return Absolute path of the working directory
+	 */
+	public static String getWorkingDirectory(String baseDir) {
+		if (baseDir == null || baseDir.isEmpty()) {
+			baseDir = System.getProperty("user.dir");
+		}
+		return Paths.get(baseDir, "extensions").toString();
 	}
 
 }

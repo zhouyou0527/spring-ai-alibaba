@@ -42,8 +42,13 @@ import org.springframework.util.Assert;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -72,11 +77,11 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 
 	private final ApplicationContext applicationContext;
 
+	private final AtomicInteger index = new AtomicInteger(0);
+
 	private Map<String, List<String>> md5ToToolsMap;
 
 	private Map<String, List<McpAsyncClient>> md5ToClientMap;
-
-	private Map<String, Integer> client2CountMap;
 
 	private List<Instance> instances;
 
@@ -110,10 +115,8 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 		md5ToToolsMap = new ConcurrentHashMap<>();
 		md5ToClientMap = new ConcurrentHashMap<>();
 
-		client2CountMap = new ConcurrentHashMap<>();
-
 		for (Instance instance : instances) {
-			updateByAddInstace(instance);
+			updateByAddInstance(instance);
 		}
 	}
 
@@ -132,19 +135,9 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 		if (asynClients.isEmpty()) {
 			throw new IllegalStateException("No McpAsyncClient available");
 		}
-		// 从client2CountMap中挑选value最小的键是哪个
-		String clientInfoName = client2CountMap.entrySet()
-			.stream()
-			.min(Map.Entry.comparingByValue())
-			.map(Map.Entry::getKey)
-			.get();
+		int currentIndex = index.getAndUpdate(index -> (index + 1) % asynClients.size());
 
-		client2CountMap.put(clientInfoName, client2CountMap.get(clientInfoName) + 1);
-		// 从clients中找到clientInfoName对应的client
-		return asynClients.stream()
-			.filter(aysnClient -> aysnClient.getClientInfo().name().equals(clientInfoName))
-			.findFirst()
-			.get();
+		return asynClients.get(currentIndex);
 	}
 
 	public List<McpAsyncClient> getMcpAsyncClientList() {
@@ -235,20 +228,9 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 				asyncClients.addAll(md5ToClientMap.get(md5));
 			}
 		});
-		Set<String> clientInfos = asyncClients.stream()
-			.map(client -> client.getClientInfo().name())
-			.collect(Collectors.toSet());
+		int currentIndex = index.getAndUpdate(index -> (index + 1) % asyncClients.size());
 
-		String minClientInfoName = clientInfos.stream()
-			.min(Comparator.comparingInt(clientInfo -> client2CountMap.getOrDefault(clientInfo, 0)))
-			.get();
-		client2CountMap.put(minClientInfoName, client2CountMap.get(minClientInfoName) + 1);
-
-		McpAsyncClient mcpAsyncClient = asyncClients.stream()
-			.filter(asyncClient -> asyncClient.getClientInfo().name().equals(minClientInfoName))
-			.findFirst()
-			.get();
-		return mcpAsyncClient.callTool(callToolRequest);
+		return asyncClients.get(currentIndex).callTool(callToolRequest);
 	}
 
 	public Mono<McpSchema.ListToolsResult> listTools() {
@@ -376,18 +358,18 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 
 	private void updateClientList(List<Instance> currentInstances) {
 		// 新增的实例
-		List<Instance> addInstaces = currentInstances.stream()
+		List<Instance> addInstances = currentInstances.stream()
 			.filter(instance -> !instances.contains(instance))
 			.collect(Collectors.toList());
-		for (Instance addInstace : addInstaces) {
-			updateByAddInstace(addInstace);
+		for (Instance addInstance : addInstances) {
+			updateByAddInstance(addInstance);
 		}
 		// 移除的实例
 		List<Instance> removeInstances = instances.stream()
 			.filter(instance -> !currentInstances.contains(instance))
 			.collect(Collectors.toList());
 		for (Instance removeInstance : removeInstances) {
-			updateByRemoveInstace(removeInstance);
+			updateByRemoveInstance(removeInstance);
 		}
 		this.instances = currentInstances;
 	}
@@ -417,13 +399,12 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 		return asyncClient;
 	}
 
-	private void updateByAddInstace(Instance instance) {
+	private void updateByAddInstance(Instance instance) {
 		Map<String, String> metadata = instance.getMetadata();
 		String serverMd5 = metadata.get("server.md5");
 		assert serverMd5 != null;
 		McpAsyncClient mcpAsyncClient = clientByInstance(instance);
 		md5ToClientMap.computeIfAbsent(serverMd5, k -> new ArrayList<>()).add(mcpAsyncClient);
-		client2CountMap.put(mcpAsyncClient.getClientInfo().name(), 0);
 
 		if (!md5ToToolsMap.containsKey(serverMd5)) {
 			String tools = metadata.get("tools.names");
@@ -431,7 +412,7 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 		}
 	}
 
-	private void updateByRemoveInstace(Instance instance) {
+	private void updateByRemoveInstance(Instance instance) {
 		String clientInfoName = connectedClientName(commonProperties.getName(),
 				this.serviceName + "-" + instance.getInstanceId());
 		String serverMd5 = instance.getMetadata().get("server.md5");
@@ -447,7 +428,6 @@ public class LoadbalancedMcpAsyncClient implements EventListener {
 				asyncClient.closeGracefully().block();
 				// 安全地移除
 				md5ToClientMap.get(serverMd5).remove(asyncClient);
-				client2CountMap.remove(asyncClient.getClientInfo().name());
 
 				if (md5ToClientMap.get(serverMd5).isEmpty()) {
 					md5ToClientMap.remove(serverMd5);

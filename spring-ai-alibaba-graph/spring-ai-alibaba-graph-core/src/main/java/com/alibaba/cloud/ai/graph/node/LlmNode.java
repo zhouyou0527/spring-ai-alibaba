@@ -17,14 +17,12 @@ package com.alibaba.cloud.ai.graph.node;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
+import com.alibaba.cloud.ai.graph.streaming.StreamingChatGenerator;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.prompt.ChatOptions;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
@@ -33,7 +31,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.Objects;
 
 public class LlmNode implements NodeAction {
 
@@ -42,8 +40,6 @@ public class LlmNode implements NodeAction {
 	private String systemPrompt;
 
 	private String userPrompt;
-
-	private ChatOptions chatOptions;
 
 	private Map<String, Object> params = new HashMap<>();
 
@@ -65,11 +61,13 @@ public class LlmNode implements NodeAction {
 
 	private ChatClient chatClient;
 
+	private Boolean stream = Boolean.FALSE;
+
 	public LlmNode() {
 	}
 
 	public LlmNode(String systemPrompt, String prompt, Map<String, Object> params, List<Message> messages,
-			List<Advisor> advisors, List<ToolCallback> toolCallbacks, ChatClient chatClient) {
+			List<Advisor> advisors, List<ToolCallback> toolCallbacks, ChatClient chatClient, boolean stream) {
 		this.systemPrompt = systemPrompt;
 		this.userPrompt = prompt;
 		this.params = params;
@@ -77,19 +75,34 @@ public class LlmNode implements NodeAction {
 		this.advisors = advisors;
 		this.toolCallbacks = toolCallbacks;
 		this.chatClient = chatClient;
+		this.stream = stream;
 	}
 
 	@Override
 	public Map<String, Object> apply(OverAllState state) throws Exception {
 		initNodeWithState(state);
-		ChatResponse response = call();
-		
-		Map<String, Object> updatedState = new HashMap<>();
-		updatedState.put("messages", response.getResult().getOutput());
-		if (StringUtils.hasLength(this.outputKey)) {
-			updatedState.put(this.outputKey, response.getResult().getOutput());
+
+		// add streaming support
+		if (Boolean.TRUE.equals(stream)) {
+			Flux<ChatResponse> chatResponseFlux = stream();
+			var generator = StreamingChatGenerator.builder()
+				.startingNode("llmNode")
+				.startingState(state)
+				.mapResult(response -> Map.of(StringUtils.hasLength(this.outputKey) ? this.outputKey : "messages",
+						Objects.requireNonNull(response.getResult().getOutput())))
+				.build(chatResponseFlux);
+			return Map.of(StringUtils.hasLength(this.outputKey) ? this.outputKey : "messages", generator);
 		}
-		return updatedState;
+		else {
+			ChatResponse response = call();
+
+			Map<String, Object> updatedState = new HashMap<>();
+			updatedState.put("messages", response.getResult().getOutput());
+			if (StringUtils.hasLength(this.outputKey)) {
+				updatedState.put(this.outputKey, response.getResult().getOutput());
+			}
+			return updatedState;
+		}
 	}
 
 	private void initNodeWithState(OverAllState state) {
@@ -171,7 +184,6 @@ public class LlmNode implements NodeAction {
 		else {
 			if (StringUtils.hasLength(systemPrompt)) {
 				return chatClient.prompt()
-						.options(chatOptions)
 					.system(systemPrompt)
 					.messages(messages)
 					.advisors(advisors)
@@ -181,7 +193,6 @@ public class LlmNode implements NodeAction {
 			}
 			else if (StringUtils.hasLength(userPrompt)) {
 				return chatClient.prompt()
-						.options(chatOptions)
 					.user(userPrompt)
 					.messages(messages)
 					.advisors(advisors)
@@ -191,7 +202,6 @@ public class LlmNode implements NodeAction {
 			}
 			else {
 				return chatClient.prompt()
-						.options(chatOptions)
 					.messages(messages)
 					.advisors(advisors)
 					.toolCallbacks(toolCallbacks)
@@ -231,7 +241,7 @@ public class LlmNode implements NodeAction {
 
 		private List<ToolCallback> toolCallbacks;
 
-		private ChatOptions chatOptions;
+		private Boolean stream;
 
 		public Builder userPromptTemplate(String userPromptTemplate) {
 			this.userPromptTemplate = userPromptTemplate;
@@ -293,8 +303,8 @@ public class LlmNode implements NodeAction {
 			return this;
 		}
 
-		public Builder chatOptions(ChatOptions chatOptions) {
-			this.chatOptions = chatOptions;
+		public Builder stream(Boolean stream) {
+			this.stream = stream;
 			return this;
 		}
 
@@ -307,6 +317,7 @@ public class LlmNode implements NodeAction {
 			llmNode.paramsKey = this.paramsKey;
 			llmNode.messagesKey = this.messagesKey;
 			llmNode.outputKey = this.outputKey;
+			llmNode.stream = this.stream;
 			if (this.params != null) {
 				llmNode.params = this.params;
 			}
@@ -320,7 +331,6 @@ public class LlmNode implements NodeAction {
 				llmNode.toolCallbacks = this.toolCallbacks;
 			}
 			llmNode.chatClient = this.chatClient;
-			llmNode.chatOptions = this.chatOptions;
 			return llmNode;
 		}
 

@@ -55,18 +55,18 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 	@Override
 	public void write(OverAllState object, ObjectOutput out) throws IOException {
 		String json = objectMapper.writeValueAsString(object);
-		byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-		out.writeInt(bytes.length);
-		out.write(bytes);
+		byte[] jsonBytes = json.getBytes(StandardCharsets.UTF_8);
+		out.writeInt(jsonBytes.length);
+		out.write(jsonBytes);
 	}
 
 	@Override
 	public OverAllState read(ObjectInput in) throws IOException, ClassNotFoundException {
 		int length = in.readInt();
-		byte[] bytes = new byte[length];
-		in.readFully(bytes);
-		String json = new String(bytes, StandardCharsets.UTF_8);
-		return objectMapper.readValue(json, OverAllState.class);
+		byte[] jsonBytes = new byte[length];
+		in.readFully(jsonBytes);
+		String json = new String(jsonBytes, StandardCharsets.UTF_8);
+		return objectMapper.readValue(json, getStateType());
 	}
 
 }

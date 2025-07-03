@@ -28,16 +28,18 @@ import com.alibaba.cloud.ai.example.manus.planning.coordinator.PlanningCoordinat
 import com.alibaba.cloud.ai.example.manus.planning.creator.PlanCreator;
 import com.alibaba.cloud.ai.example.manus.planning.executor.PlanExecutor;
 import com.alibaba.cloud.ai.example.manus.planning.finalizer.PlanFinalizer;
+import com.alibaba.cloud.ai.example.manus.prompt.PromptLoader;
 import com.alibaba.cloud.ai.example.manus.recorder.PlanExecutionRecorder;
 import com.alibaba.cloud.ai.example.manus.tool.DocLoaderTool;
+import com.alibaba.cloud.ai.example.manus.tool.FormInputTool;
 import com.alibaba.cloud.ai.example.manus.tool.PlanningTool;
 import com.alibaba.cloud.ai.example.manus.tool.TerminateTool;
 import com.alibaba.cloud.ai.example.manus.tool.ToolCallBiFunctionDef;
 import com.alibaba.cloud.ai.example.manus.tool.bash.Bash;
 import com.alibaba.cloud.ai.example.manus.tool.browser.BrowserUseTool;
 import com.alibaba.cloud.ai.example.manus.tool.browser.ChromeDriverService;
-import com.alibaba.cloud.ai.example.manus.tool.code.CodeUtils;
 import com.alibaba.cloud.ai.example.manus.tool.code.PythonExecute;
+import com.alibaba.cloud.ai.example.manus.tool.code.ToolExecuteResult;
 import com.alibaba.cloud.ai.example.manus.tool.searchAPI.GoogleSearch;
 import com.alibaba.cloud.ai.example.manus.tool.textOperator.TextFileOperator;
 import com.alibaba.cloud.ai.example.manus.tool.textOperator.TextFileService;
@@ -64,7 +66,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -88,8 +89,6 @@ public class PlanningFactory {
 
 	private final McpService mcpService;
 
-	private ConcurrentHashMap<String, PlanningCoordinator> flowMap = new ConcurrentHashMap<>();
-
 	@Autowired
 	@Lazy
 	private LlmService llmService;
@@ -104,6 +103,9 @@ public class PlanningFactory {
 	@Autowired
 	private McpStateHolderService mcpStateHolderService;
 
+	@Autowired
+	private PromptLoader promptLoader;
+
 	public PlanningFactory(ChromeDriverService chromeDriverService, PlanExecutionRecorder recorder,
 			ManusProperties manusProperties, TextFileService textFileService, McpService mcpService) {
 		this.chromeDriverService = chromeDriverService;
@@ -113,17 +115,6 @@ public class PlanningFactory {
 		this.mcpService = mcpService;
 	}
 
-	// public PlanningCoordinator getOrCreatePlanningFlow(String planId) {
-	// PlanningCoordinator flow = flowMap.computeIfAbsent(planId, key -> {
-	// return createPlanningCoordinator(planId);
-	// });
-	// return flow;
-	// }
-
-	// public boolean removePlanningFlow(String planId) {
-	// return flowMap.remove(planId) != null;
-	// }
-
 	public PlanningCoordinator createPlanningCoordinator(String planId) {
 
 		// Add all dynamic agents from the database
@@ -131,9 +122,9 @@ public class PlanningFactory {
 
 		PlanningTool planningTool = new PlanningTool();
 
-		PlanCreator planCreator = new PlanCreator(agentEntities, llmService, planningTool, recorder);
+		PlanCreator planCreator = new PlanCreator(agentEntities, llmService, planningTool, recorder, promptLoader);
 		PlanExecutor planExecutor = new PlanExecutor(agentEntities, recorder, agentService, llmService);
-		PlanFinalizer planFinalizer = new PlanFinalizer(llmService, recorder);
+		PlanFinalizer planFinalizer = new PlanFinalizer(llmService, recorder, promptLoader);
 
 		PlanningCoordinator planningCoordinator = new PlanningCoordinator(planCreator, planExecutor, planFinalizer);
 
@@ -165,27 +156,29 @@ public class PlanningFactory {
 		Map<String, ToolCallBackContext> toolCallbackMap = new HashMap<>();
 		List<ToolCallBiFunctionDef> toolDefinitions = new ArrayList<>();
 
-		// 添加所有工具定义
+		// Add all tool definitions
 		toolDefinitions.add(BrowserUseTool.getInstance(chromeDriverService));
 		toolDefinitions.add(new TerminateTool(planId));
-		toolDefinitions.add(new Bash(CodeUtils.WORKING_DIR));
+		toolDefinitions.add(new Bash(manusProperties));
 		toolDefinitions.add(new DocLoaderTool());
-		toolDefinitions.add(new TextFileOperator(CodeUtils.WORKING_DIR, textFileService));
+		toolDefinitions.add(new TextFileOperator(textFileService));
 		toolDefinitions.add(new GoogleSearch());
 		toolDefinitions.add(new PythonExecute());
+		toolDefinitions.add(new FormInputTool());
+
 		List<McpServiceEntity> functionCallbacks = mcpService.getFunctionCallbacks(planId);
 		for (McpServiceEntity toolCallback : functionCallbacks) {
 			String serviceGroup = toolCallback.getServiceGroup();
 			ToolCallback[] tCallbacks = toolCallback.getAsyncMcpToolCallbackProvider().getToolCallbacks();
 			for (ToolCallback tCallback : tCallbacks) {
-				// 这里的 serviceGroup 是工具的名称
+				// The serviceGroup is the name of the tool
 				toolDefinitions.add(new McpTool(tCallback, serviceGroup, planId, mcpStateHolderService));
 			}
 		}
 
-		// 为每个工具创建 FunctionToolCallback
+		// Create FunctionToolCallback for each tool
 		for (ToolCallBiFunctionDef toolDefinition : toolDefinitions) {
-			FunctionToolCallback functionToolcallback = FunctionToolCallback
+			FunctionToolCallback<?, ToolExecuteResult> functionToolcallback = FunctionToolCallback
 				.builder(toolDefinition.getName(), toolDefinition)
 				.description(toolDefinition.getDescription())
 				.inputSchema(toolDefinition.getParameters())
@@ -202,25 +195,26 @@ public class PlanningFactory {
 
 	@Bean
 	public RestClient.Builder createRestClient() {
-		// 1. 配置超时时间（单位：毫秒）
-		int connectionTimeout = 600000; // 连接超时时间
-		int readTimeout = 600000; // 响应读取超时时间
-		int writeTimeout = 600000; // 请求写入超时时间
+		// 1. Configure the timeout (unit: milliseconds)
+		int connectionTimeout = 600000; // Connection timeout
+		int readTimeout = 600000; // Response read timeout
+		int writeTimeout = 600000; // Request write timeout
 
-		// 2. 创建 RequestConfig 并设置超时
+		// 2. Create RequestConfig and set the timeout
 		RequestConfig requestConfig = RequestConfig.custom()
-			.setConnectTimeout(Timeout.of(10, TimeUnit.MINUTES)) // 设置连接超时
+			.setConnectTimeout(Timeout.of(10, TimeUnit.MINUTES)) // Set the connection
+																	// timeout
 			.setResponseTimeout(Timeout.of(10, TimeUnit.MINUTES))
 			.setConnectionRequestTimeout(Timeout.of(10, TimeUnit.MINUTES))
 			.build();
 
-		// 3. 创建 CloseableHttpClient 并应用配置
+		// 3. Create CloseableHttpClient and apply the configuration
 		HttpClient httpClient = HttpClients.custom().setDefaultRequestConfig(requestConfig).build();
 
-		// 4. 使用 HttpComponentsClientHttpRequestFactory 包装 HttpClient
+		// 4. Use HttpComponentsClientHttpRequestFactory to wrap HttpClient
 		HttpComponentsClientHttpRequestFactory requestFactory = new HttpComponentsClientHttpRequestFactory(httpClient);
 
-		// 5. 创建 RestClient 并设置请求工厂
+		// 5. Create RestClient and set the request factory
 		return RestClient.builder().requestFactory(requestFactory);
 	}
 

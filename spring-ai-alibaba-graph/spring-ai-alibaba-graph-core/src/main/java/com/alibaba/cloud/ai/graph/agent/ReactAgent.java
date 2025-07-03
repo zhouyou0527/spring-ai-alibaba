@@ -15,16 +15,21 @@
  */
 package com.alibaba.cloud.ai.graph.agent;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
-import com.alibaba.cloud.ai.graph.*;
+import com.alibaba.cloud.ai.graph.CompileConfig;
+import com.alibaba.cloud.ai.graph.CompiledGraph;
+import com.alibaba.cloud.ai.graph.KeyStrategy;
+import com.alibaba.cloud.ai.graph.KeyStrategyFactory;
+import com.alibaba.cloud.ai.graph.OverAllState;
+import com.alibaba.cloud.ai.graph.StateGraph;
+import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
-import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.node.LlmNode;
-import com.alibaba.cloud.ai.graph.node.ThinkNode;
 import com.alibaba.cloud.ai.graph.node.ToolNode;
 import com.alibaba.cloud.ai.graph.state.strategy.AppendStrategy;
 
@@ -32,8 +37,6 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.prompt.ChatOptions;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.resolution.ToolCallbackResolver;
 
@@ -46,13 +49,21 @@ public class ReactAgent {
 
 	private String name;
 
-	private ThinkNode thinkNode;
+	private final LlmNode llmNode;
 
-	private ToolNode toolNode;
+	private final ToolNode toolNode;
 
-	private StateGraph graph;
+	private final StateGraph graph;
 
 	private CompiledGraph compiledGraph;
+
+	private NodeAction preLlmHook;
+
+	private NodeAction postLlmHook;
+
+	private NodeAction preToolHook;
+
+	private NodeAction postToolHook;
 
 	private List<String> tools;
 
@@ -62,21 +73,35 @@ public class ReactAgent {
 
 	private CompileConfig compileConfig;
 
-	private OverAllStateFactory overAllStateFactory;
+	private KeyStrategyFactory keyStrategyFactory;
 
 	private Function<OverAllState, Boolean> shouldContinueFunc;
 
-	public ReactAgent() {
+	private ReactAgent(String name, LlmNode llmNode, ToolNode toolNode, int maxIterations,
+			KeyStrategyFactory keyStrategyFactory, CompileConfig compileConfig,
+			Function<OverAllState, Boolean> shouldContinueFunc, NodeAction preLlmHook, NodeAction postLlmHook,
+			NodeAction preToolHook, NodeAction postToolHook) throws GraphStateException {
+		this.name = name;
+		this.llmNode = llmNode;
+		this.toolNode = toolNode;
+		this.max_iterations = maxIterations;
+		this.keyStrategyFactory = keyStrategyFactory;
+		this.compileConfig = compileConfig;
+		this.shouldContinueFunc = shouldContinueFunc;
+		this.preLlmHook = preLlmHook;
+		this.postLlmHook = postLlmHook;
+		this.preToolHook = preToolHook;
+		this.postToolHook = postToolHook;
+		this.graph = initGraph();
 	}
 
-	public ReactAgent(String name, ThinkNode thinkNode, List<ToolCallback> tools, int maxIterations, OverAllStateFactory overAllStateFactory,
+	public ReactAgent(LlmNode llmNode, ToolNode toolNode, int maxIterations, KeyStrategyFactory keyStrategyFactory,
 			CompileConfig compileConfig, Function<OverAllState, Boolean> shouldContinueFunc)
 			throws GraphStateException {
-		this.name = name;
-		this.thinkNode = thinkNode;
-		this.toolNode = ToolNode.builder().toolCallbacks(tools).build();
+		this.llmNode = llmNode;
+		this.toolNode = toolNode;
 		this.max_iterations = maxIterations;
-		this.overAllStateFactory = overAllStateFactory;
+		this.keyStrategyFactory = keyStrategyFactory;
 		this.compileConfig = compileConfig;
 		this.shouldContinueFunc = shouldContinueFunc;
 		this.graph = initGraph();
@@ -85,20 +110,20 @@ public class ReactAgent {
 	public ReactAgent(String name, ChatClient chatClient, List<ToolCallback> tools, int maxIterations)
 			throws GraphStateException {
 		this.name = name;
-		this.thinkNode = ThinkNode.builder().chatClient(chatClient).toolCallbacks(tools).messagesKey("messages").build();
+		this.llmNode = LlmNode.builder().chatClient(chatClient).messagesKey("messages").build();
 		this.toolNode = ToolNode.builder().toolCallbacks(tools).build();
 		this.max_iterations = maxIterations;
 		this.graph = initGraph();
 	}
 
 	public ReactAgent(String name, ChatClient chatClient, List<ToolCallback> tools, int maxIterations,
-			OverAllStateFactory overAllStateFactory, CompileConfig compileConfig,
+			KeyStrategyFactory keyStrategyFactory, CompileConfig compileConfig,
 			Function<OverAllState, Boolean> shouldContinueFunc) throws GraphStateException {
 		this.name = name;
-		this.thinkNode = ThinkNode.builder().chatClient(chatClient).toolCallbacks(tools).messagesKey("messages").build();
+		this.llmNode = LlmNode.builder().chatClient(chatClient).messagesKey("messages").build();
 		this.toolNode = ToolNode.builder().toolCallbacks(tools).build();
 		this.max_iterations = maxIterations;
-		this.overAllStateFactory = overAllStateFactory;
+		this.keyStrategyFactory = keyStrategyFactory;
 		this.compileConfig = compileConfig;
 		this.graph = initGraph();
 	}
@@ -106,7 +131,7 @@ public class ReactAgent {
 	public ReactAgent(String name, ChatClient chatClient, ToolCallbackResolver resolver, int maxIterations)
 			throws GraphStateException {
 		this.name = name;
-		this.thinkNode = ThinkNode.builder()
+		this.llmNode = LlmNode.builder()
 			.chatClient(chatClient)
 			// .userPromptTemplate(prompt)
 			.messagesKey("messages")
@@ -117,13 +142,13 @@ public class ReactAgent {
 	}
 
 	public ReactAgent(String name, ChatClient chatClient, ToolCallbackResolver resolver, int maxIterations,
-			OverAllStateFactory overAllStateFactory, CompileConfig compileConfig,
+			KeyStrategyFactory keyStrategyFactory, CompileConfig compileConfig,
 			Function<OverAllState, Boolean> shouldContinueFunc) throws GraphStateException {
 		this.name = name;
-		this.thinkNode = ThinkNode.builder().chatClient(chatClient).messagesKey("messages").build();
+		this.llmNode = LlmNode.builder().chatClient(chatClient).messagesKey("messages").build();
 		this.toolNode = ToolNode.builder().toolCallbackResolver(resolver).build();
 		this.max_iterations = maxIterations;
-		this.overAllStateFactory = overAllStateFactory;
+		this.keyStrategyFactory = keyStrategyFactory;
 		this.compileConfig = compileConfig;
 		this.shouldContinueFunc = shouldContinueFunc;
 		this.graph = initGraph();
@@ -164,21 +189,61 @@ public class ReactAgent {
 	}
 
 	private StateGraph initGraph() throws GraphStateException {
-		if (overAllStateFactory == null) {
-			this.overAllStateFactory = () -> {
-				OverAllState defaultState = new OverAllState();
-				defaultState.registerKeyAndStrategy("messages", new AppendStrategy());
-				return defaultState;
+		if (keyStrategyFactory == null) {
+			this.keyStrategyFactory = () -> {
+				HashMap<String, KeyStrategy> keyStrategyHashMap = new HashMap<>();
+				keyStrategyHashMap.put("messages", new AppendStrategy());
+				return keyStrategyHashMap;
 			};
 		}
 
-		return new StateGraph(this.overAllStateFactory)
-			.addNode("agent", node_async(this.thinkNode))
-			.addNode("tool", node_async(this.toolNode))
-			.addEdge(START, "agent")
-			.addConditionalEdges("agent", edge_async(this::think), 
-				Map.of("continue", "tool", "end", END))
-			.addEdge("tool", "agent");
+		StateGraph graph = new StateGraph(name, this.keyStrategyFactory);
+
+		if (preLlmHook != null) {
+			graph.addNode("preLlm", node_async(preLlmHook));
+		}
+		graph.addNode("llm", node_async(this.llmNode));
+		if (postLlmHook != null) {
+			graph.addNode("postLlm", node_async(postLlmHook));
+		}
+
+		if (preToolHook != null) {
+			graph.addNode("preTool", node_async(preToolHook));
+		}
+		graph.addNode("tool", node_async(this.toolNode));
+		if (postToolHook != null) {
+			graph.addNode("postTool", node_async(postToolHook));
+		}
+
+		if (preLlmHook != null) {
+			graph.addEdge(START, "preLlm").addEdge("preLlm", "llm");
+		}
+		else {
+			graph.addEdge(START, "llm");
+		}
+
+		if (postLlmHook != null) {
+			graph.addEdge("llm", "postLlm")
+				.addConditionalEdges("postLlm", edge_async(this::think),
+						Map.of("continue", preToolHook != null ? "preTool" : "tool", "end", END));
+		}
+		else {
+			graph.addConditionalEdges("llm", edge_async(this::think),
+					Map.of("continue", preToolHook != null ? "preTool" : "tool", "end", END));
+		}
+
+		// 添加工具相关边
+		if (preToolHook != null) {
+			graph.addEdge("preTool", "tool");
+		}
+		if (postToolHook != null) {
+			graph.addEdge("tool", "postTool").addEdge("postTool", preLlmHook != null ? "preLlm" : "llm");
+		}
+		else {
+			graph.addEdge("tool", preLlmHook != null ? "preLlm" : "llm");
+		}
+
+		return graph;
 	}
 
 	private String think(OverAllState state) {
@@ -231,12 +296,12 @@ public class ReactAgent {
 		this.compileConfig = compileConfig;
 	}
 
-	OverAllStateFactory getOverAllStateFactory() {
-		return overAllStateFactory;
+	KeyStrategyFactory getKeyStrategyFactory() {
+		return keyStrategyFactory;
 	}
 
-	void setOverAllStateFactory(OverAllStateFactory overAllStateFactory) {
-		this.overAllStateFactory = overAllStateFactory;
+	void setOverAllStateFactory(KeyStrategyFactory keyStrategyFactory) {
+		this.keyStrategyFactory = keyStrategyFactory;
 	}
 
 	Function<OverAllState, Boolean> getShouldContinueFunc() {
@@ -245,10 +310,6 @@ public class ReactAgent {
 
 	void setShouldContinueFunc(Function<OverAllState, Boolean> shouldContinueFunc) {
 		this.shouldContinueFunc = shouldContinueFunc;
-	}
-
-	void setName(String name) {
-		this.name = name;
 	}
 
 	public static Builder builder() {
@@ -265,17 +326,21 @@ public class ReactAgent {
 
 		private ToolCallbackResolver resolver;
 
-		private NodeAction preLlmHook;
-
-		private NodeAction postLlmHook;
-
 		private int maxIterations = 10;
 
 		private CompileConfig compileConfig;
 
-		private OverAllStateFactory allStateFactory;
+		private KeyStrategyFactory keyStrategyFactory;
 
 		private Function<OverAllState, Boolean> shouldContinueFunc;
+
+		private NodeAction preLlmHook;
+
+		private NodeAction postLlmHook;
+
+		private NodeAction preToolHook;
+
+		private NodeAction postToolHook;
 
 		public Builder name(String name) {
 			this.name = name;
@@ -302,8 +367,8 @@ public class ReactAgent {
 			return this;
 		}
 
-		public Builder state(OverAllStateFactory overAllStateFactory) {
-			this.allStateFactory = overAllStateFactory;
+		public Builder state(KeyStrategyFactory keyStrategyFactory) {
+			this.keyStrategyFactory = keyStrategyFactory;
 			return this;
 		}
 
@@ -327,28 +392,31 @@ public class ReactAgent {
 			return this;
 		}
 
-		public ReactAgent build() throws GraphStateException {
-			ReactAgent agent = new ReactAgent();
-			agent.setName(name);
-			agent.setMax_iterations(maxIterations);
-			agent.setCompileConfig(compileConfig);
-			agent.setOverAllStateFactory(allStateFactory);
-			agent.setShouldContinueFunc(shouldContinueFunc);
+		public Builder preToolHook(NodeAction preToolHook) {
+			this.preToolHook = preToolHook;
+			return this;
+		}
 
+		public Builder postToolHook(NodeAction postToolHook) {
+			this.postToolHook = postToolHook;
+			return this;
+		}
+
+		public ReactAgent build() throws GraphStateException {
+			LlmNode llmNode = LlmNode.builder().chatClient(chatClient).messagesKey("messages").build();
+			ToolNode toolNode = null;
 			if (resolver != null) {
-				agent.thinkNode = ThinkNode.builder().chatClient(chatClient)
-						.preLlmHook(preLlmHook).postLlmHook(postLlmHook).messagesKey("messages").build();
-				agent.toolNode = ToolNode.builder().toolCallbackResolver(resolver).build();
+				toolNode = ToolNode.builder().toolCallbackResolver(resolver).build();
 			}
 			else if (tools != null) {
-				agent.thinkNode = ThinkNode.builder().chatClient(chatClient)
-						.preLlmHook(preLlmHook).postLlmHook(postLlmHook).toolCallbacks(tools)
-						.messagesKey("messages").build();
-				agent.toolNode = ToolNode.builder().toolCallbacks(tools).build();
+				toolNode = ToolNode.builder().toolCallbacks(tools).build();
+			}
+			else {
+				throw new IllegalArgumentException("Either tools or resolver must be provided");
 			}
 
-			agent.graph = agent.initGraph();
-			return agent;
+			return new ReactAgent(name, llmNode, toolNode, maxIterations, keyStrategyFactory, compileConfig,
+					shouldContinueFunc, preLlmHook, postLlmHook, preToolHook, postToolHook);
 		}
 
 	}

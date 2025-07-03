@@ -34,7 +34,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * 计划模板服务类，提供计划模板相关的业务逻辑
+ * Plan template service class that provides business logic related to plan templates
  */
 @Service
 public class PlanTemplateService {
@@ -48,30 +48,30 @@ public class PlanTemplateService {
 	private PlanTemplateVersionRepository versionRepository;
 
 	/**
-	 * 保存计划模板及其第一个版本
-	 * @param planTemplateId 计划模板ID
-	 * @param title 计划标题
-	 * @param userRequest 用户请求
-	 * @param planJson 计划JSON数据
+	 * Save plan template and its first version
+	 * @param planTemplateId Plan template ID
+	 * @param title Plan title
+	 * @param userRequest User request
+	 * @param planJson Plan JSON data
 	 */
 	@Transactional
 	public void savePlanTemplate(String planTemplateId, String title, String userRequest, String planJson) {
-		// 保存计划模板基本信息
+		// Save basic plan template information
 		PlanTemplate template = new PlanTemplate(planTemplateId, title, userRequest);
 		planTemplateRepository.save(template);
 
-		// 保存第一个版本
-		saveVersionToHistory(planTemplateId, planJson);
+		// Save the first version
+		saveToVersionHistory(planTemplateId, planJson);
 
-		logger.info("已保存计划模板 {} 及其第一个版本", planTemplateId);
+		logger.info("Saved plan template {} and its first version", planTemplateId);
 	}
 
 	/**
-	 * 更新计划模板信息
-	 * @param planTemplateId 计划模板ID
-	 * @param title 计划标题
-	 * @param planJson 计划JSON数据
-	 * @return 是否更新成功
+	 * Update plan template information
+	 * @param planTemplateId Plan template ID
+	 * @param title Plan title
+	 * @param planJson Plan JSON data
+	 * @return Whether the update was successful
 	 */
 	@Transactional
 	public boolean updatePlanTemplate(String planTemplateId, String title, String planJson) {
@@ -84,46 +84,104 @@ public class PlanTemplateService {
 			template.setUpdateTime(LocalDateTime.now());
 			planTemplateRepository.save(template);
 
-			// 保存新版本
-			saveVersionToHistory(planTemplateId, planJson);
+			// Save new version
+			saveToVersionHistory(planTemplateId, planJson);
 
-			logger.info("已更新计划模板 {} 及保存新版本", planTemplateId);
+			logger.info("Updated plan template {} and saved new version", planTemplateId);
 			return true;
 		}
 		return false;
 	}
 
 	/**
-	 * 保存计划版本到历史记录
-	 * @param planTemplateId 计划模板ID
-	 * @param planJson 计划JSON数据
+	 * Version save result class
 	 */
-	@Transactional
-	public void saveVersionToHistory(String planTemplateId, String planJson) {
-		// 获取最大版本号
-		Integer maxVersionIndex = versionRepository.findMaxVersionIndexByPlanTemplateId(planTemplateId);
-		int newVersionIndex = (maxVersionIndex == null) ? 0 : maxVersionIndex + 1;
+	public static class VersionSaveResult {
 
-		// 保存新版本
-		PlanTemplateVersion version = new PlanTemplateVersion(planTemplateId, newVersionIndex, planJson);
-		versionRepository.save(version);
+		private final boolean saved;
 
-		logger.info("已保存计划 {} 的版本 {}", planTemplateId, newVersionIndex);
+		private final boolean duplicate;
+
+		private final String message;
+
+		private final int versionIndex;
+
+		public VersionSaveResult(boolean saved, boolean duplicate, String message, int versionIndex) {
+			this.saved = saved;
+			this.duplicate = duplicate;
+			this.message = message;
+			this.versionIndex = versionIndex;
+		}
+
+		public boolean isSaved() {
+			return saved;
+		}
+
+		public boolean isDuplicate() {
+			return duplicate;
+		}
+
+		public String getMessage() {
+			return message;
+		}
+
+		public int getVersionIndex() {
+			return versionIndex;
+		}
+
 	}
 
 	/**
-	 * 获取计划模板
-	 * @param planTemplateId 计划模板ID
-	 * @return 计划模板实体，如果不存在则返回null
+	 * Save plan version to history record
+	 * @param planTemplateId Plan template ID
+	 * @param planJson Plan JSON data
+	 * @return Save result information
+	 */
+	@Transactional
+	public VersionSaveResult saveToVersionHistory(String planTemplateId, String planJson) {
+		// Check if content is the same as the latest version
+		if (isContentSameAsLatestVersion(planTemplateId, planJson)) {
+			logger.info("Content of plan {} is the same as latest version, skipping version save", planTemplateId);
+			Integer maxVersionIndex = versionRepository.findMaxVersionIndexByPlanTemplateId(planTemplateId);
+			return new VersionSaveResult(false, true, "Content same as latest version, no new version created",
+					maxVersionIndex != null ? maxVersionIndex : -1);
+		}
+
+		// Get maximum version number
+		Integer maxVersionIndex = versionRepository.findMaxVersionIndexByPlanTemplateId(planTemplateId);
+		int newVersionIndex = (maxVersionIndex == null) ? 0 : maxVersionIndex + 1;
+
+		// Save new version
+		PlanTemplateVersion version = new PlanTemplateVersion(planTemplateId, newVersionIndex, planJson);
+		versionRepository.save(version);
+
+		logger.info("Saved version {} of plan {}", newVersionIndex, planTemplateId);
+		return new VersionSaveResult(true, false, "New version saved", newVersionIndex);
+	}
+
+	/**
+	 * Save plan version to history record (compatibility method)
+	 * @param planTemplateId Plan template ID
+	 * @param planJson Plan JSON data
+	 */
+	@Transactional
+	public void saveVersionToHistory(String planTemplateId, String planJson) {
+		saveToVersionHistory(planTemplateId, planJson);
+	}
+
+	/**
+	 * Get plan template
+	 * @param planTemplateId Plan template ID
+	 * @return Plan template entity, returns null if not exists
 	 */
 	public PlanTemplate getPlanTemplate(String planTemplateId) {
 		return planTemplateRepository.findByPlanTemplateId(planTemplateId).orElse(null);
 	}
 
 	/**
-	 * 获取计划的所有版本JSON数据
-	 * @param planTemplateId 计划模板ID
-	 * @return 版本JSON数据列表
+	 * Get all version JSON data of the plan
+	 * @param planTemplateId Plan template ID
+	 * @return List of version JSON data
 	 */
 	public List<String> getPlanVersions(String planTemplateId) {
 		List<PlanTemplateVersion> versions = versionRepository
@@ -136,10 +194,10 @@ public class PlanTemplateService {
 	}
 
 	/**
-	 * 获取计划的指定版本
-	 * @param planTemplateId 计划模板ID
-	 * @param versionIndex 版本索引
-	 * @return 版本JSON数据，如果版本不存在则返回null
+	 * Get specified version of the plan
+	 * @param planTemplateId Plan template ID
+	 * @param versionIndex Version index
+	 * @return Version JSON data, returns null if version does not exist
 	 */
 	public String getPlanVersion(String planTemplateId, int versionIndex) {
 		PlanTemplateVersion version = versionRepository.findByPlanTemplateIdAndVersionIndex(planTemplateId,
@@ -148,9 +206,9 @@ public class PlanTemplateService {
 	}
 
 	/**
-	 * 获取计划的最新版本
-	 * @param planTemplateId 计划模板ID
-	 * @return 最新版本的JSON数据，如果没有版本则返回null
+	 * Get the latest version of the plan
+	 * @param planTemplateId Plan template ID
+	 * @return Latest version JSON data, returns null if no version exists
 	 */
 	public String getLatestPlanVersion(String planTemplateId) {
 		Integer maxVersionIndex = versionRepository.findMaxVersionIndexByPlanTemplateId(planTemplateId);
@@ -161,51 +219,95 @@ public class PlanTemplateService {
 	}
 
 	/**
-	 * 从ExecutionPlan对象中提取标题
-	 * @param planJson 计划JSON字符串
-	 * @return 计划标题，如果无法提取则返回默认标题
+	 * Check if given content is the same as the latest version
+	 * @param planTemplateId Plan template ID
+	 * @param planJson Plan JSON data to check
+	 * @return Returns true if content is the same, false otherwise
+	 */
+	public boolean isContentSameAsLatestVersion(String planTemplateId, String planJson) {
+		String latestVersion = getLatestPlanVersion(planTemplateId);
+		return isJsonContentEquivalent(latestVersion, planJson);
+	}
+
+	/**
+	 * Intelligently compare if two JSON strings are semantically identical, ignoring
+	 * format differences (spaces, line breaks, etc.), only comparing actual content
+	 * @param json1 First JSON string
+	 * @param json2 Second JSON string
+	 * @return Returns true if semantically identical, false otherwise
+	 */
+	public boolean isJsonContentEquivalent(String json1, String json2) {
+		if (json1 == null && json2 == null) {
+			return true;
+		}
+		if (json1 == null || json2 == null) {
+			return false;
+		}
+
+		// First try simple string comparison
+		if (json1.equals(json2)) {
+			return true;
+		}
+
+		try {
+			ObjectMapper mapper = new ObjectMapper();
+			JsonNode node1 = mapper.readTree(json1);
+			JsonNode node2 = mapper.readTree(json2);
+			return node1.equals(node2);
+		}
+		catch (Exception e) {
+			logger.warn("Failed to parse JSON content during comparison, falling back to string comparison", e);
+			// If JSON parsing fails, fall back to string comparison
+			return json1.equals(json2);
+		}
+	}
+
+	/**
+	 * Extract title from ExecutionPlan object
+	 * @param planJson Plan JSON string
+	 * @return Plan title, returns default title if extraction fails
 	 */
 	public String extractTitleFromPlan(String planJson) {
 		try {
 			ObjectMapper mapper = new ObjectMapper();
 			JsonNode rootNode = mapper.readTree(planJson);
 			if (rootNode.has("title")) {
-				return rootNode.get("title").asText("未命名计划");
+				return rootNode.get("title").asText("Untitled Plan");
 			}
 		}
 		catch (Exception e) {
-			logger.warn("从计划JSON中提取标题失败", e);
+			logger.warn("Failed to extract title from plan JSON", e);
 		}
-		return "未命名计划";
+		return "Untitled Plan";
 	}
 
 	/**
-	 * 获取所有计划模板
-	 * @return 所有计划模板的列表
+	 * Get all plan templates
+	 * @return List of all plan templates
 	 */
 	public List<PlanTemplate> getAllPlanTemplates() {
 		return planTemplateRepository.findAll();
 	}
 
 	/**
-	 * 删除计划模板
-	 * @param planTemplateId 计划模板ID
-	 * @return 是否删除成功
+	 * Delete plan template
+	 * @param planTemplateId Plan template ID
+	 * @return Whether deletion was successful
 	 */
 	@Transactional
 	public boolean deletePlanTemplate(String planTemplateId) {
 		try {
-			// 先删除所有相关的版本
+			// First delete all related versions
 			versionRepository.deleteByPlanTemplateId(planTemplateId);
 
-			// 再删除模板本身
+			// Then delete the template itself
 			planTemplateRepository.deleteByPlanTemplateId(planTemplateId);
 
-			logger.info("已删除计划模板 {} 及其所有版本", planTemplateId);
+			logger.info("Deleted plan template {} and all its versions", planTemplateId);
 			return true;
 		}
 		catch (Exception e) {
-			logger.error("删除计划模板 {} 失败", planTemplateId, e);
+			logger.error("Failed to delete plan template {}", planTemplateId, e);
 			return false;
 		}
 	}
