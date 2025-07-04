@@ -57,9 +57,13 @@ public class OpenmanusHumanController {
 
 	String stepPrompt = "Tools available: xxx";
 
+	String decisionPrompt = "你是一个智能路由决策器，负责根据任务类型和当前状态选择最合适的agent来处理任务。";
+
 	private final ChatClient planningClient;
 
 	private final ChatClient stepClient;
+
+	private final ChatClient decisionClient;
 
 	@Autowired
 	private ToolCallbackResolver resolver;
@@ -78,6 +82,12 @@ public class OpenmanusHumanController {
 
 		this.stepClient = ChatClient.builder(chatModel)
 			.defaultSystem(stepPrompt)
+			.defaultAdvisors(new SimpleLoggerAdvisor())
+			.defaultOptions(OpenAiChatOptions.builder().internalToolExecutionEnabled(false).build())
+			.build();
+
+		this.decisionClient = ChatClient.builder(chatModel)
+			.defaultSystem(decisionPrompt)
 			.defaultAdvisors(new SimpleLoggerAdvisor())
 			.defaultOptions(OpenAiChatOptions.builder().internalToolExecutionEnabled(false).build())
 			.build();
@@ -117,6 +127,59 @@ public class OpenmanusHumanController {
 
 		GraphRepresentation graphRepresentation = compiledGraph.getGraph(GraphRepresentation.Type.PLANTUML);
 		System.out.println("\n\n");
+		System.out.println(graphRepresentation.content());
+		System.out.println("\n\n");
+	}
+
+	@GetMapping("/init-intelligent")
+	public void initIntelligentGraph() throws GraphStateException {
+		// 创建多个agents
+		ReactAgent planningAgent = new ReactAgent("planningAgent", planningClient, resolver, 10);
+		planningAgent.getAndCompileGraph();
+		
+		ReactAgent stepAgent = new ReactAgent("stepAgent", stepClient, resolver, 10);
+		stepAgent.getAndCompileGraph();
+		
+		SupervisorAgent supervisorAgent = new SupervisorAgent(planningTool);
+		HumanNode humanNode = new HumanNode();
+
+		// 创建智能条件边
+		IntelligentConditionalEdge intelligentEdge = IntelligentConditionalEdge.builder()
+			.decisionClient(decisionClient)
+			.resolver(resolver)
+			.addAgent("planning_agent", "负责任务规划和分解，将复杂任务拆分为可执行的步骤", planningAgent)
+			.addAgent("step_agent", "负责执行具体的任务步骤，处理详细的操作指令", stepAgent)
+			.addAgent("supervisor_agent", "负责监督和协调整个任务执行过程，确保任务按计划进行", supervisorAgent)
+			.build();
+
+		StateGraph graph = new StateGraph(() -> {
+			Map<String, KeyStrategy> strategies = new HashMap<>();
+			strategies.put("input", new ReplaceStrategy());
+			strategies.put("plan", new ReplaceStrategy());
+			strategies.put("step_prompt", new ReplaceStrategy());
+			strategies.put("step_output", new ReplaceStrategy());
+			strategies.put("final_output", new ReplaceStrategy());
+			return strategies;
+		})
+		.addNode("human", node_async(humanNode))
+		.addNode("planning_agent", planningAgent.asAsyncNodeAction("input", "plan"))
+		.addNode("step_agent", stepAgent.asAsyncNodeAction("step_prompt", "step_output"))
+		.addNode("supervisor_agent", node_async(supervisorAgent))
+
+		.addEdge(START, "human")
+		.addConditionalEdges("human", intelligentEdge.createIntelligentEdge(),
+				Map.of("planning_agent", "planning_agent", "step_agent", "step_agent", "supervisor_agent", "supervisor_agent"))
+		.addConditionalEdges("planning_agent", edge_async(supervisorAgent::think),
+				Map.of("continue", "step_agent", "end", END))
+		.addConditionalEdges("step_agent", edge_async(supervisorAgent::think),
+				Map.of("continue", "supervisor_agent", "end", END))
+		.addConditionalEdges("supervisor_agent", edge_async(supervisorAgent::think),
+				Map.of("continue", "human", "end", END));
+
+		this.compiledGraph = graph.compile();
+
+		GraphRepresentation graphRepresentation = compiledGraph.getGraph(GraphRepresentation.Type.PLANTUML);
+		System.out.println("\n\n智能条件边图结构:");
 		System.out.println(graphRepresentation.content());
 		System.out.println("\n\n");
 	}
@@ -162,6 +225,23 @@ public class OpenmanusHumanController {
 		// send back to user and wait for plan approval
 
 		return result.get().data().toString();
+	}
+
+	@GetMapping("/test-intelligent-routing")
+	public String testIntelligentRouting(String query) throws GraphRunnerException {
+		// 确保已经初始化了智能图
+		if (compiledGraph == null) {
+			try {
+				initIntelligentGraph();
+			} catch (GraphStateException e) {
+				return "初始化智能图失败: " + e.getMessage();
+			}
+		}
+
+		RunnableConfig runnableConfig = RunnableConfig.builder().threadId("intelligent-test").build();
+		Optional<OverAllState> result = compiledGraph.invoke(Map.of("input", query), runnableConfig);
+		
+		return "智能路由结果: " + result.get().data().toString();
 	}
 
 }

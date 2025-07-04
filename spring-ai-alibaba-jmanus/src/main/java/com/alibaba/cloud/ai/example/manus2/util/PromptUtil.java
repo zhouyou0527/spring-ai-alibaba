@@ -16,16 +16,11 @@
 
 package com.alibaba.cloud.ai.example.manus2.util;
 
-import com.alibaba.cloud.ai.graph.OverAllState;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.util.StreamUtils;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * @author yingzi

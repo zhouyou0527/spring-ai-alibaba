@@ -20,7 +20,6 @@ import java.util.Map;
 
 import com.alibaba.cloud.ai.example.manus.agent.BaseAgent;
 import com.alibaba.cloud.ai.example.manus.dynamic.agent.model.Tool;
-import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 
 public interface AgentService {
 

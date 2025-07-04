@@ -24,17 +24,13 @@ import com.alibaba.cloud.ai.example.manus.planning.executor.PlanExecutor;
 import com.alibaba.cloud.ai.example.manus.planning.model.vo.ExecutionStep;
 import com.alibaba.cloud.ai.example.manus.recorder.PlanExecutionRecorder;
 import com.alibaba.cloud.ai.example.manus2.plan.ExecutionPlan;
-import com.alibaba.cloud.ai.graph.CompileConfig;
 import com.alibaba.cloud.ai.graph.CompiledGraph;
+import com.alibaba.cloud.ai.graph.KeyStrategy;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
-import com.alibaba.cloud.ai.graph.checkpoint.config.SaverConfig;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
-import com.alibaba.cloud.ai.graph.node.LlmNode;
-import com.alibaba.cloud.ai.graph.node.ThinkNode;
-import com.alibaba.cloud.ai.graph.node.ToolNode;
 import com.alibaba.cloud.ai.graph.state.strategy.AppendStrategy;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.alibaba.fastjson.JSON;
@@ -44,10 +40,8 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.chat.prompt.SystemPromptTemplate;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -270,10 +264,10 @@ public class ExecutorNode implements NodeAction {
                 .chatClient(chatClient.build())
                 .tools(toolCallbacks)
                 .state(() -> {
-                    OverAllState defaultState = new OverAllState();
-                    defaultState.registerKeyAndStrategy("messages", new AppendStrategy());
-                    defaultState.registerKeyAndStrategy("envData", new ReplaceStrategy());
-                    return defaultState;
+                    HashMap<String, KeyStrategy> keyStrategyHashMap = new HashMap<>();
+                    keyStrategyHashMap.put("messages", new AppendStrategy());
+                    keyStrategyHashMap.put("envData", new ReplaceStrategy());
+                    return keyStrategyHashMap;
                 })
                 .preLlmHook( (NodeAction) state -> {
                     // 在每次think时收集环境信息

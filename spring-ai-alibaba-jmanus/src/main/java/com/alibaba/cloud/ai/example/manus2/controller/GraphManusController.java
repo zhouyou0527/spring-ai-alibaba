@@ -17,11 +17,7 @@ package com.alibaba.cloud.ai.example.manus2.controller;
 
 import com.alibaba.cloud.ai.example.manus.contants.NodeConstants;
 import com.alibaba.cloud.ai.graph.*;
-import com.alibaba.cloud.ai.graph.checkpoint.config.SaverConfig;
-import com.alibaba.cloud.ai.graph.checkpoint.constant.SaverConstant;
-import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
-import com.alibaba.cloud.ai.graph.exception.GraphStateException;
-import com.alibaba.cloud.ai.graph.state.StateSnapshot;
+import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -53,7 +49,12 @@ public class GraphManusController {
                 .threadId(String.valueOf(planId))
                 .build();
 
-        var resultFuture = compiledGraph.invoke(objectMap, runnableConfig);
+        Optional<OverAllState> resultFuture = null;
+        try {
+            resultFuture = compiledGraph.invoke(objectMap, runnableConfig);
+        } catch (GraphRunnerException e) {
+            throw new RuntimeException(e);
+        }
         return resultFuture.get().data();
     }
 
@@ -67,7 +68,12 @@ public class GraphManusController {
         OverAllState.HumanFeedback humanFeedback = new OverAllState.HumanFeedback(
                 Map.of("feedback", feedback), NodeConstants.HUMAN_ID);
 
-        Optional<OverAllState> resumed = compiledGraph.resume(humanFeedback, runnableConfig);
+        Optional<OverAllState> resumed = null;
+        try {
+            resumed = compiledGraph.resume(humanFeedback, runnableConfig);
+        } catch (GraphRunnerException e) {
+            throw new RuntimeException(e);
+        }
 
         return resumed.get().data();
 
